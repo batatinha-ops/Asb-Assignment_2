@@ -1,0 +1,6 @@
+#!/bin/bash
+humann2 --input unmapped_reads_1.fastq \
+        --output humann2_output/Amostra1/ \
+        --taxonomic-profile resultados_taxprofiler2/kraken2/standard_8gb/Amostra1_SRR19591482_standard_8gb.kraken2.kraken2.report.txt \
+        --bypass-nucleotide-search \
+        --threads 4
