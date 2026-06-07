@@ -1,0 +1,96 @@
+# Taxonomic Classification Barplot
+# Data: ASV_tax_silva_138_2.tsv
+# Plot: Horizontal barplot of % classification per taxonomic level (base R)
+
+# ── 1. Load data ──────────────────────────────────────────────────────────────
+df <- read.table(
+  "ASV_tax_silva_138_2.tsv",
+  sep          = "\t",
+  header       = TRUE,
+  quote        = "",
+  fill         = TRUE,
+  comment.char = "",
+  na.strings   = c("", "NA", "na", "N/A")
+)
+
+# ── 2. Compute % classification per taxonomic level ───────────────────────────
+tax_levels <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+
+total <- nrow(df)
+
+pct_classified <- sapply(tax_levels, function(lvl) {
+  sum(!is.na(df[[lvl]])) / total * 100
+})
+
+# Reverse order so Kingdom appears at top of horizontal barplot
+pct_classified <- rev(pct_classified)
+tax_ordered    <- rev(tax_levels)
+
+# ── 3. Colour palette (gradient from high to low classification) ───────────────
+bar_colors <- colorRampPalette(c("#2166AC", "#74ADD1", "#ABD9E9",
+                                  "#FEE090", "#FDAE61", "#F46D43",
+                                  "#D73027"))(length(tax_levels))
+
+# ── 4. Plot ───────────────────────────────────────────────────────────────────
+png(
+  filename = "tax_classification_barplot.png",
+  width    = 800,
+  height   = 500,
+  res      = 120
+)
+
+par(
+  mar    = c(5, 7, 4, 6),   # bottom, left, top, right
+  family = "sans"
+)
+
+bp <- barplot(
+  pct_classified,
+  horiz   = TRUE,
+  xlim    = c(0, 115),
+  col     = bar_colors,
+  border  = "white",
+  names.arg = tax_ordered,
+  las     = 1,              # horizontal axis labels
+  xlab    = "% Classification",
+  main    = "ASV Taxonomic Classification Rate\n(SILVA 138)",
+  cex.names = 0.95,
+  cex.lab   = 0.95,
+  cex.main  = 1.1,
+  axes    = FALSE
+)
+
+# Custom X axis
+axis(1, at = seq(0, 100, by = 20), labels = paste0(seq(0, 100, by = 20), "%"),
+     las = 1, cex.axis = 0.85)
+
+# Vertical grid lines
+abline(v = seq(0, 100, by = 20), col = "grey85", lty = "dashed", lwd = 0.8)
+
+# Re-draw bars on top of grid
+barplot(
+  pct_classified,
+  horiz     = TRUE,
+  col       = bar_colors,
+  border    = "white",
+  add       = TRUE,
+  axes      = FALSE,
+  names.arg = rep("", length(tax_ordered))
+)
+
+# Value labels at the end of each bar
+text(
+  x      = pct_classified + 1.5,
+  y      = bp,
+  labels = sprintf("%.1f%%", pct_classified),
+  adj    = 0,
+  cex    = 0.82,
+  col    = "grey20"
+)
+
+# Box around plot area
+box(col = "grey60")
+
+dev.off()
+
+cat("Plot saved to: tax_classification_barplot.png\n")
