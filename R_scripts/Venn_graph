@@ -1,1 +1,26 @@
+library(ggvenn)
+library(dplyr)
 
+abund <- read.table("abs-abund-table-6-mod.tsv", header=TRUE, sep="\t", 
+                    check.names=FALSE, stringsAsFactors=FALSE)
+meta  <- read.table("metadata.tsv", header=TRUE, sep="\t", 
+                    check.names=FALSE, stringsAsFactors=FALSE)
+
+# Nomes correctos conforme o metadata
+control <- meta$sampleid[meta$`sample-type` == "control"]
+HPV     <- meta$sampleid[meta$`sample-type` == "HPV"]
+
+asv_control <- abund$tax[rowSums(abund[, control]) > 0]
+asv_HPV     <- abund$tax[rowSums(abund[, HPV]) > 0]
+
+venn_list <- list(
+  Control = asv_control,
+  HPV     = asv_HPV
+)
+
+ggvenn(venn_list, 
+       fill_color = c("#aec7e8", "#d62728"),
+       stroke_size = 0.5,
+       set_name_size = 5)
+
+ggsave("venn_ASVs.pdf", width=6, height=6)
