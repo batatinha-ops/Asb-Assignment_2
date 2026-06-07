@@ -58,4 +58,9 @@ For visualizing additional graphs, R was used, scripts avaiable at:
 
 ---
 ## Workflow for Metagenomics sequencing
+### Step 1 - Download the read
+[obtain_reads](metagenomics_scripts/obtain_reads)
 
+
+### Step 2 - Generate samplesheet
+[samplesheet.sh](metagenomics_scripts/samplesheet.sh)
