@@ -1,0 +1,334 @@
+#!/usr/bin/env Rscript
+# =============================================================================
+# ANCOM-BC2 Differential Abundance Analysis
+# Usage: Rscript ancombc2_analysis.R <abundance_table> <metadata_file>
+#                                     <variable_of_interest> <tax_level>
+# =============================================================================
+
+# ---- 1. Install / load dependencies -----------------------------------------
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+pkgs <- c("ANCOMBC", "TreeSummarizedExperiment", "mia", "phyloseq", "microbiome")
+for (pkg in pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE))
+    BiocManager::install(pkg, ask = FALSE)
+}
+
+suppressPackageStartupMessages({
+  library(ANCOMBC)
+  library(TreeSummarizedExperiment)
+  library(mia)
+  library(ggplot2)
+  library(dplyr)
+})
+
+# ---- 2. Parse command-line arguments ----------------------------------------
+
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) < 4) {
+  cat("Usage: Rscript ancombc2_analysis.R <abundance_table> <metadata_file> <variable_of_interest> <tax_level>\n")
+  cat("  tax_level: Kingdom, Phylum, Class, Order, Family, Genus, or Species\n")
+  cat("Example: Rscript ancombc2_analysis.R abundance.tsv metadata.tsv year Genus\n")
+  quit(status = 1)
+}
+
+abundance_file   <- args[1]
+metadata_file    <- args[2]
+var_of_interest  <- args[3]
+tax_level        <- args[4]
+
+# Capitalise first letter so the user can pass e.g. "genus" or "Genus"
+tax_level <- paste0(toupper(substr(tax_level, 1, 1)),
+                    tolower(substr(tax_level, 2, nchar(tax_level))))
+
+valid_ranks <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+if (!tax_level %in% valid_ranks)
+  stop("Invalid taxonomic level '", tax_level, "'. ",
+       "Choose one of: ", paste(valid_ranks, collapse = ", "))
+
+cat("=== ANCOM-BC2 Differential Abundance Analysis ===\n")
+cat("Abundance table     :", abundance_file,  "\n")
+cat("Metadata file       :", metadata_file,   "\n")
+cat("Variable of interest:", var_of_interest, "\n")
+cat("Taxonomic level     :", tax_level,       "\n\n")
+
+# ---- 3. Load data -----------------------------------------------------------
+
+# --- Abundance table ----------------------------------------------------------
+# Expected format: rows = taxa (semicolon-separated lineage in 'tax' column),
+#                  columns = samples + 'total'
+abund_raw <- read.table(abundance_file,
+                        header = TRUE, sep = "\t",
+                        check.names = FALSE, stringsAsFactors = FALSE)
+
+# Drop the 'total' column if present
+abund_raw <- abund_raw[, colnames(abund_raw) != "total"]
+
+# Use the 'tax' column as row names, then remove it
+rownames(abund_raw) <- abund_raw$tax
+abund_raw$tax <- NULL
+
+# Convert to integer matrix (ANCOMBC expects counts, not floats)
+count_mat <- round(as.matrix(abund_raw))
+storage.mode(count_mat) <- "integer"
+
+cat("Loaded", nrow(count_mat), "taxa across", ncol(count_mat), "samples.\n")
+
+# --- Metadata -----------------------------------------------------------------
+meta_raw <- readLines(metadata_file)
+meta_raw <- meta_raw[!grepl("^#q2:", meta_raw)]   # strip QIIME2 type directives
+meta <- read.table(text = paste(meta_raw, collapse = "\n"),
+                   header = TRUE, sep = "\t",
+                   check.names = FALSE, stringsAsFactors = FALSE)
+meta <- as.data.frame(lapply(meta, function(x) if (is.character(x)) trimws(x) else x),
+                      stringsAsFactors = FALSE)
+# Accept "sampleid", "sample_id", "sample-id", "#SampleID" etc.
+id_col <- grep("^#?sample.?id$", colnames(meta), ignore.case = TRUE, value = TRUE)
+if (length(id_col) == 0)
+  stop("Cannot find sample ID column. Columns found: ",
+       paste(colnames(meta), collapse = ", "))
+rownames(meta) <- meta[[id_col[1]]]
+
+
+# Keep only samples present in both the abundance table and metadata
+common_samples <- intersect(colnames(count_mat), rownames(meta))
+if (length(common_samples) == 0)
+  stop("No common samples found between the abundance table and metadata. ",
+       "Check that sample IDs match exactly.")
+
+count_mat <- count_mat[, common_samples, drop = FALSE]
+meta      <- meta[common_samples, , drop = FALSE]
+
+cat("Using", length(common_samples), "common samples.\n\n")
+
+# Validate variable of interest
+if (!var_of_interest %in% colnames(meta))
+  stop("Variable of interest '", var_of_interest, "' not found in metadata. ",
+       "Available columns: ", paste(colnames(meta), collapse = ", "))
+
+# Ensure variable of interest is a factor
+meta[[var_of_interest]] <- as.factor(meta[[var_of_interest]])
+cat("'", var_of_interest, "' levels: ",
+    paste(levels(meta[[var_of_interest]]), collapse = ", "), "\n\n", sep = "")
+
+# ---- 4. Build TreeSummarizedExperiment (TSE) --------------------------------
+
+# Parse taxonomy string into a matrix
+# Expected lineage: "Kingdom;Phylum;Class;Order;Family;Genus"
+tax_strings  <- rownames(count_mat)
+tax_split    <- strsplit(tax_strings, ";")
+n_ranks      <- max(lengths(tax_split))
+rank_names   <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus",
+                  "Species")[seq_len(n_ranks)]
+
+tax_mat <- t(sapply(tax_split, function(x) {
+  length(x) <- n_ranks   # pad shorter lineages with NA
+  x
+}))
+colnames(tax_mat) <- rank_names
+rownames(tax_mat) <- tax_strings
+
+# Validate that the requested level is present in this dataset
+if (!tax_level %in% rank_names)
+  stop("Taxonomic level '", tax_level, "' is not present in this dataset. ",
+       "Available ranks: ", paste(rank_names, collapse = ", "))
+
+# ---- 4a. Aggregate counts to the requested taxonomic level ------------------
+
+# Build a grouping key = lineage truncated at the chosen rank
+level_idx  <- which(rank_names == tax_level)
+group_keys <- apply(tax_mat[, seq_len(level_idx), drop = FALSE], 1,
+                    function(x) paste(x, collapse = ";"))
+
+# Sum counts for rows that share the same truncated lineage
+unique_keys <- unique(group_keys)
+agg_mat <- matrix(0L, nrow = length(unique_keys), ncol = ncol(count_mat),
+                  dimnames = list(unique_keys, colnames(count_mat)))
+for (key in unique_keys)
+  agg_mat[key, ] <- colSums(count_mat[group_keys == key, , drop = FALSE])
+
+cat(sprintf("Aggregated %d tip-level rows -> %d unique %s-level taxa.\n\n",
+            nrow(count_mat), nrow(agg_mat), tax_level))
+
+count_mat <- agg_mat   # replace tip-level matrix with aggregated one
+
+# Rebuild tax_mat for the aggregated rows
+tax_split2 <- strsplit(rownames(count_mat), ";")
+tax_mat <- t(sapply(tax_split2, function(x) {
+  length(x) <- level_idx
+  x
+}))
+colnames(tax_mat) <- rank_names[seq_len(level_idx)]
+rownames(tax_mat) <- rownames(count_mat)
+
+row_data <- DataFrame(tax_mat)
+col_data <- DataFrame(meta)
+
+tse <- TreeSummarizedExperiment(
+  assays  = list(counts = count_mat),
+  rowData = row_data,
+  colData = col_data
+)
+
+# ---- 5. Run ANCOM-BC2 -------------------------------------------------------
+
+cat("Running ANCOM-BC2 (this may take a moment) ...\n")
+set.seed(123)
+
+out <- ancombc2(
+  data         = tse,
+  assay_name   = "counts",
+  fix_formula  = var_of_interest,   # variable of interest
+  p_adj_method = "BH",
+  pseudo_sens  = TRUE,
+  prv_cut      = 0.10,
+  lib_cut      = 1000,
+  s0_perc      = 0.05,
+  group        = var_of_interest,
+  struc_zero   = TRUE,
+  neg_lb       = TRUE,
+  alpha        = 0.05,
+  n_cl         = 1,
+  verbose      = TRUE
+)
+
+cat("\nANCOM-BC2 completed.\n\n")
+
+# ---- 6. Extract primary results ---------------------------------------------
+
+res <- out$res
+
+# Identify log-fold-change and q-value columns for 'year'
+lfc_cols  <- grep(paste0("^lfc_",  var_of_interest), colnames(res), value = TRUE)
+qval_cols <- grep(paste0("^q_",    var_of_interest), colnames(res), value = TRUE)
+diff_cols <- grep(paste0("^diff_", var_of_interest), colnames(res), value = TRUE)
+
+cat("Detected contrast columns:\n")
+cat("  LFC  :", paste(lfc_cols,  collapse = ", "), "\n")
+cat("  q-val:", paste(qval_cols, collapse = ", "), "\n\n")
+
+# ---- 7. Helper: short taxon label -------------------------------------------
+# After aggregation the last element of the lineage IS the chosen rank, so we
+# just show the final two ranks (or one if only one rank was requested).
+
+short_label <- function(tax_str, n = 2) {
+  parts <- strsplit(tax_str, ";")[[1]]
+  paste(tail(parts, min(n, length(parts))), collapse = ";")
+}
+
+res$label <- sapply(res$taxon, short_label)
+
+# ---- 8. Plot function --------------------------------------------------------
+
+make_volcano <- function(res, lfc_col, qval_col, diff_col, contrast_name,
+                         out_dir = ".") {
+  
+  df <- res[, c("taxon", "label", lfc_col, qval_col, diff_col)]
+  colnames(df) <- c("taxon", "label", "lfc", "qval", "diff")
+  df <- df[!is.na(df$lfc), ]
+  df$neg_log10_q <- -log10(df$qval + 1e-300)
+  df$sig <- ifelse(df$diff, "Significant (q<0.05)", "Not significant")
+  
+  p <- ggplot(df, aes(x = lfc, y = neg_log10_q, colour = sig, label = label)) +
+    geom_point(size = 2, alpha = 0.8) +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", colour = "grey40") +
+    geom_vline(xintercept = 0, linetype = "dotted", colour = "grey60") +
+    ggrepel::geom_text_repel(
+      data = df[df$diff, ],
+      size = 2.5, max.overlaps = 20, show.legend = FALSE
+    ) +
+    scale_colour_manual(values = c("Significant (q<0.05)" = "#d62728",
+                                   "Not significant"      = "#aec7e8")) +
+    labs(
+      title    = paste("ANCOM-BC2 Volcano Plot –", contrast_name),
+      subtitle = paste(sum(df$diff, na.rm = TRUE), "differentially abundant taxa"),
+      x        = "Log-fold change",
+      y        = expression(-log[10](q-value)),
+      colour   = NULL
+    ) +
+    theme_bw(base_size = 12) +
+    theme(legend.position = "bottom")
+  
+  fname <- file.path(out_dir,
+                     paste0("volcano_", gsub("[^A-Za-z0-9]", "_", contrast_name), ".pdf"))
+  ggsave(fname, p, width = 8, height = 6)
+  cat("Saved:", fname, "\n")
+  invisible(p)
+}
+
+make_lfc_barplot <- function(res, lfc_col, qval_col, diff_col, contrast_name,
+                             out_dir = ".") {
+  
+  df <- res[, c("taxon", "label", lfc_col, qval_col, diff_col)]
+  colnames(df) <- c("taxon", "label", "lfc", "qval", "diff")
+  df <- df[!is.na(df$diff) & df$diff, ]   # keep only significant taxa
+  
+  if (nrow(df) == 0) {
+    cat("No significant taxa for contrast:", contrast_name, "– skipping barplot.\n")
+    return(invisible(NULL))
+  }
+  
+  df <- df[order(df$lfc), ]
+  df$label <- factor(df$label, levels = df$label)
+  df$direction <- ifelse(df$lfc > 0, "Enriched", "Depleted")
+  
+  p <- ggplot(df, aes(x = lfc, y = label, fill = direction)) +
+    geom_col() +
+    geom_vline(xintercept = 0, colour = "black") +
+    scale_fill_manual(values = c("Enriched" = "#2ca02c", "Depleted" = "#d62728")) +
+    labs(
+      title    = paste("Significant Taxa –", contrast_name),
+      subtitle = paste(nrow(df), "taxa with q < 0.05"),
+      x        = "Log-fold change (ANCOM-BC2)",
+      y        = paste0("Taxon (", tax_level, " level)"),
+      fill     = NULL
+    ) +
+    theme_bw(base_size = 12) +
+    theme(legend.position = "bottom")
+  
+  fname <- file.path(out_dir,
+                     paste0("lfc_barplot_", gsub("[^A-Za-z0-9]", "_", contrast_name), ".pdf"))
+  ggsave(fname, p, width = 8, height = max(4, nrow(df) * 0.35 + 2))
+  cat("Saved:", fname, "\n")
+  invisible(p)
+}
+
+# ---- 9. Generate plots -------------------------------------------------------
+
+# Install ggrepel if needed (for volcano labels)
+if (!requireNamespace("ggrepel", quietly = TRUE))
+  install.packages("ggrepel")
+library(ggrepel)
+
+out_dir <- "ancombc2_results"
+dir.create(out_dir, showWarnings = FALSE)
+
+for (i in seq_along(lfc_cols)) {
+  contrast <- sub("^lfc_", "", lfc_cols[i])   # e.g. "year2024"
+  cat("\n--- Contrast:", contrast, "---\n")
+  
+  make_volcano(res, lfc_cols[i], qval_cols[i], diff_cols[i],
+               contrast_name = contrast, out_dir = out_dir)
+  
+  make_lfc_barplot(res, lfc_cols[i], qval_cols[i], diff_cols[i],
+                   contrast_name = contrast, out_dir = out_dir)
+}
+
+# ---- 10. Save full results table --------------------------------------------
+
+results_file <- file.path(out_dir, "ancombc2_primary_results.tsv")
+write.table(res, results_file, sep = "\t", quote = FALSE, row.names = FALSE)
+cat("\nFull results saved to:", results_file, "\n")
+
+# ---- 11. Brief summary ------------------------------------------------------
+
+cat("\n=== Summary ===\n")
+for (i in seq_along(diff_cols)) {
+  n_sig <- sum(res[[diff_cols[i]]], na.rm = TRUE)
+  cat(sub("^diff_", "", diff_cols[i]), "–", n_sig, "significant taxa\n")
+}
+
+cat("\nAll outputs written to:", out_dir, "/\n")
+cat("Done.\n")
