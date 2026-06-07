@@ -64,3 +64,17 @@ For visualizing additional graphs, R was used, scripts avaiable at:
 
 ### Step 2 - Generate samplesheet
 [samplesheet.sh](metagenomics_scripts/samplesheet.sh)
+
+### Extra - Necessary before proceding
+Before following to the next step it is necessary the creation of a file for configuration of the pipeline configs and limits (used CPUs and RAM)
+Example in: [custom.config](metagenomics_scripts/custom.config)
+Furthermore is also necessary an aditional file defining the parameters 
+Example in: [parameters](metagenomics_scripts/parameters)
+
+### Step 3 - Nextflow-taxprofiller
+Scrip used to run taxprofiller:
+[taxprofiler](metagenomics_scripts/taxprofiler.sh)
+
+### Step 4 - Humann2
+Scrip used to run Humann2:
+[humann2](metagenomics_scripts/humann2)
