@@ -59,10 +59,12 @@ For visualizing additional graphs, R was used, scripts avaiable at:
 ---
 ## Workflow for Metagenomics sequencing
 ### Step 1 - Download the read
+Read the accession numbers and download fastq files from them
 [obtain_reads](metagenomics_scripts/obtain_reads)
 
 
 ### Step 2 - Generate samplesheet
+Create samplesheet as in 16S
 [samplesheet.sh](metagenomics_scripts/samplesheet.sh)
 
 ### Extra - Necessary before proceding
