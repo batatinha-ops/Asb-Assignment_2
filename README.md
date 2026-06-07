@@ -52,6 +52,10 @@ To view the results can resort to:
 python3 -m http.server
 ```
 For visualizing additional graphs, R was used, scripts avaiable at:
+[Diferencial_abundance](R_scripts/Diferencial_abundance)
+[Taxonomic_assignment](R_scripts/Taxonomic_assignment)
+[Venn_graph](R_scripts/Venn_graph)
 
-
+---
+## Workflow for Metagenomics sequencing
 
