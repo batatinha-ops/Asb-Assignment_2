@@ -1,0 +1,5 @@
+input: samplesheet.csv
+databases: database.csv
+outdir: resultados_taxprofiler2
+perform_shortread_qc: true
+run_kraken2: true
